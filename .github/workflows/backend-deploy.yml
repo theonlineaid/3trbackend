@@ -1,0 +1,94 @@
+name: Deploy Frontend to ECS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-deploy.yml"
+
+env:
+  AWS_REGION: ap-southeast-1
+  ECR_REPOSITORY: 3tier-app-frontend      # matches aws_ecr_repository.frontend name in Terraform
+  ECS_CLUSTER: 3tier-app-cluster          # matches aws_ecs_cluster.main name
+  ECS_SERVICE: 3tier-app-frontend         # matches aws_ecs_service.frontend name
+  ECS_TASK_FAMILY: 3tier-app-frontend     # matches aws_ecs_task_definition.frontend family
+  CONTAINER_NAME: frontend                # matches container "name" in task definition
+
+permissions:
+  id-token: write   # needed only if using OIDC (see note at bottom)
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to ECR
+        id: build-image
+        working-directory: ./frontend
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build \
+            --build-arg NEXT_PUBLIC_API_URL="${{ vars.NEXT_PUBLIC_API_URL }}" \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_TASK_FAMILY }} \
+            --query taskDefinition > task-definition.json
+
+      - name: Fill in the new image in the task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Deploy new task definition to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          service: ${{ env.ECS_SERVICE }}
+          wait-for-service-stability: true
+
+# --------------------------------------------------------------------------
+# Required GitHub repo secrets (Settings -> Secrets and variables -> Actions -> Secrets):
+#   AWS_ACCESS_KEY_ID
+#   AWS_SECRET_ACCESS_KEY
+#
+# Required GitHub repo variable (Settings -> Secrets and variables -> Actions -> Variables):
+#   NEXT_PUBLIC_API_URL   e.g. "/api" (relative, via Next.js rewrite proxy)
+#
+# Your frontend/Dockerfile must declare and use this ARG before `next build`:
+#   ARG NEXT_PUBLIC_API_URL
+#   ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+#   RUN npm run build
+#
+# Better long-term option: replace the access-key secrets with OIDC role
+# assumption (no long-lived keys stored in GitHub at all). Ask if you want
+# the matching Terraform for the IAM OIDC provider + role.
+# --------------------------------------------------------------------------
