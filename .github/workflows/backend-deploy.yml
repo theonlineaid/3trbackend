@@ -1,19 +1,16 @@
-name: Deploy Frontend to ECS
+name: Deploy Backend to ECS
 
 on:
   push:
     branches: [main]
-    paths:
-      - "frontend/**"
-      - ".github/workflows/frontend-deploy.yml"
 
 env:
   AWS_REGION: ap-southeast-1
-  ECR_REPOSITORY: 3tier-app-frontend      # matches aws_ecr_repository.frontend name in Terraform
+  ECR_REPOSITORY: 3tier-app-backend       # matches aws_ecr_repository.backend name in Terraform
   ECS_CLUSTER: 3tier-app-cluster          # matches aws_ecs_cluster.main name
-  ECS_SERVICE: 3tier-app-frontend         # matches aws_ecs_service.frontend name
-  ECS_TASK_FAMILY: 3tier-app-frontend     # matches aws_ecs_task_definition.frontend family
-  CONTAINER_NAME: frontend                # matches container "name" in task definition
+  ECS_SERVICE: 3tier-app-backend          # matches aws_ecs_service.backend name
+  ECS_TASK_FAMILY: 3tier-app-backend      # matches aws_ecs_task_definition.backend family
+  CONTAINER_NAME: backend                 # matches container "name" in task definition
 
 permissions:
   id-token: write   # needed only if using OIDC (see note at bottom)
@@ -40,14 +37,11 @@ jobs:
 
       - name: Build, tag, and push image to ECR
         id: build-image
-        working-directory: ./frontend
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build \
-            --build-arg NEXT_PUBLIC_API_URL="${{ vars.NEXT_PUBLIC_API_URL }}" \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
@@ -80,13 +74,11 @@ jobs:
 #   AWS_ACCESS_KEY_ID
 #   AWS_SECRET_ACCESS_KEY
 #
-# Required GitHub repo variable (Settings -> Secrets and variables -> Actions -> Variables):
-#   NEXT_PUBLIC_API_URL   e.g. "/api" (relative, via Next.js rewrite proxy)
-#
-# Your frontend/Dockerfile must declare and use this ARG before `next build`:
-#   ARG NEXT_PUBLIC_API_URL
-#   ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
-#   RUN npm run build
+# These are the same two secrets used by the frontend repo's deploy workflow.
+# The backend task definition already carries DB_HOST/DB_USER/DB_PASSWORD etc.
+# via Terraform (see infra/main.tf aws_ecs_task_definition.backend), so no
+# extra build-time args are needed here — unlike the frontend, which bakes in
+# NEXT_PUBLIC_API_URL at build time.
 #
 # Better long-term option: replace the access-key secrets with OIDC role
 # assumption (no long-lived keys stored in GitHub at all). Ask if you want
