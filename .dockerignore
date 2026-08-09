@@ -38,10 +38,6 @@ coverage
 tmp
 .turbo
 
-# Lockfiles (optional to include in build context)
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
 
 # Dockerfile and docker-compose should remain in context usually; avoid ignoring them
 # Misc
