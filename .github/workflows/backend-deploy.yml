@@ -2,22 +2,23 @@ name: Deploy Backend to ECS
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
 
 env:
   AWS_REGION: ap-southeast-1
-  ECR_REPOSITORY: 3tier-app-backend       # matches aws_ecr_repository.backend name in Terraform
-  ECS_CLUSTER: 3tier-app-cluster          # matches aws_ecs_cluster.main name
-  ECS_SERVICE: 3tier-app-backend          # matches aws_ecs_service.backend name
-  ECS_TASK_FAMILY: 3tier-app-backend      # matches aws_ecs_task_definition.backend family
-  CONTAINER_NAME: backend                 # matches container "name" in task definition
+  ECR_REPOSITORY: tier-app-backend
+  ECS_CLUSTER: tier-app-cluster
+  ECS_SERVICE: tier-app-backend
+  ECS_TASK_FAMILY: tier-app-backend
+  CONTAINER_NAME: backend
 
 permissions:
-  id-token: write   # needed only if using OIDC (see note at bottom)
   contents: read
 
 jobs:
   deploy:
+    name: Build and Deploy Backend
     runs-on: ubuntu-latest
 
     steps:
@@ -31,37 +32,61 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, tag, and push image to ECR
-        id: build-image
+      - name: Build Docker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker build \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+
+      - name: Tag latest
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker tag \
+            $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Push image to ECR
+        id: push-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker push \
+            $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+          docker push \
+            $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Download current task definition
         run: |
           aws ecs describe-task-definition \
-            --task-definition ${{ env.ECS_TASK_FAMILY }} \
-            --query taskDefinition > task-definition.json
+            --task-definition "$ECS_TASK_FAMILY" \
+            --query taskDefinition \
+            --output json > task-definition.json
 
-      - name: Fill in the new image in the task definition
+      - name: Render new task definition
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
           task-definition: task-definition.json
           container-name: ${{ env.CONTAINER_NAME }}
-          image: ${{ steps.build-image.outputs.image }}
+          image: ${{ steps.push-image.outputs.image }}
 
-      - name: Deploy new task definition to ECS
+      - name: Deploy to ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
@@ -69,18 +94,9 @@ jobs:
           service: ${{ env.ECS_SERVICE }}
           wait-for-service-stability: true
 
-# --------------------------------------------------------------------------
-# Required GitHub repo secrets (Settings -> Secrets and variables -> Actions -> Secrets):
-#   AWS_ACCESS_KEY_ID
-#   AWS_SECRET_ACCESS_KEY
-#
-# These are the same two secrets used by the frontend repo's deploy workflow.
-# The backend task definition already carries DB_HOST/DB_USER/DB_PASSWORD etc.
-# via Terraform (see infra/main.tf aws_ecs_task_definition.backend), so no
-# extra build-time args are needed here — unlike the frontend, which bakes in
-# NEXT_PUBLIC_API_URL at build time.
-#
-# Better long-term option: replace the access-key secrets with OIDC role
-# assumption (no long-lived keys stored in GitHub at all). Ask if you want
-# the matching Terraform for the IAM OIDC provider + role.
-# --------------------------------------------------------------------------
+      - name: Deployment successful
+        run: |
+          echo "Backend deployment successful"
+          echo "Cluster: $ECS_CLUSTER"
+          echo "Service: $ECS_SERVICE"
+          echo "Image: ${{ steps.push-image.outputs.image }}"
